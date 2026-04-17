@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, timezone
 import pytz
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -31,7 +31,7 @@ from database import (
     get_all_fixtures_count,
 )
 from keyboards import MENU_TEXTS, language_kb, main_menu, settings_kb_localized
-from utils import get_city_timezone, is_top_match, normalize_lang, parse_utc_datetime, t, validate_timezone
+from utils import get_city_timezone, is_top_match, normalize_lang, parse_utc_datetime, t, validate_timezone, fetch_fixtures_from_web
 
 router = Router()
 
@@ -196,6 +196,53 @@ async def cmd_all_matches(message: Message):
         dt = parse_utc_datetime(f["match_date_utc"]).strftime("%d.%m %H:%M")
         lines.append(f"ID{f['id']}: {dt} {f['home_team_name']} - {f['away_team_name']} ({f['league']}) [{f['status']}]")
     await message.answer("\n".join(lines[:30]))
+
+
+@router.message(Command("scrape"))
+async def cmd_scrape(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(t("en", "admin_denied"))
+        return
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer("Использование: /scrape ГГГГ-ММ-ДД [дней]\nПример: /scrape 2026-04-18 3")
+        return
+    try:
+        start_date_str = args[1]
+        days = int(args[2]) if len(args) > 2 else 1
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+    except Exception:
+        await message.answer("Неверный формат даты. Используй ГГГГ-ММ-ДД")
+        return
+
+    added = 0
+    for i in range(days):
+        date_str = (start_date + timedelta(days=i)).strftime("%Y-%m-%d")
+        fixtures = await fetch_fixtures_from_web(date_str)
+        for f in fixtures:
+            # Avoid duplicates: check if same home/away/league at same datetime exists
+            existing = get_all_upcoming_fixtures(limit=1000)
+            # Simple dedup: compare home, away, time (within 1 hour)
+            is_dup = False
+            for ex in existing:
+                if (ex["home_team_name"] == f["home_team_name"] and
+                    ex["away_team_name"] == f["away_team_name"] and
+                    abs((parse_utc_datetime(ex["match_date_utc"]) - parse_utc_datetime(f["match_date_utc"])).total_seconds()) < 3600):
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
+            add_fixture(
+                home_team_name=f["home_team_name"],
+                away_team_name=f["away_team_name"],
+                league=f.get("league", "Unknown"),
+                match_date_utc=f["match_date_utc"],
+                status=f.get("status", "scheduled"),
+                score_home=f.get("score_home"),
+                score_away=f.get("score_away"),
+            )
+            added += 1
+    await message.answer(f"Добавлено {added} матчей из веб-источника.")
 
 
 def register_handlers(dp):
@@ -638,6 +685,26 @@ async def main_handler(message: Message, state: FSMContext):
         uniq_rows = sorted(set(rows))
         await message.answer(t(lang, "today_title") + "\n" + "\n".join(uniq_rows[:25]))
         return
+        timezone_name = user["timezone"]
+        tz = pytz.timezone(timezone_name)
+        now_local = datetime.now(tz)
+        rows = []
+        for team_name in favorites:
+            fixtures = get_fixtures_by_team(team_name, days=1)
+            for fixture in fixtures:
+                dt_utc = parse_utc_datetime(fixture["match_date_utc"])
+                dt_local = dt_utc.astimezone(tz)
+                if dt_local.date() != now_local.date():
+                    continue
+                rows.append(
+                    f"{dt_local.strftime('%H:%M')} - {fixture['home_team_name']} vs {fixture['away_team_name']}"
+                )
+        if not rows:
+            await message.answer(t(lang, "today_empty"))
+            return
+        uniq_rows = sorted(set(rows))
+        await message.answer(t(lang, "today_title") + "\n" + "\n".join(uniq_rows[:25]))
+        return
 
     if text == menu["center"]:
         favorites = get_favorites(message.from_user.id)
@@ -769,109 +836,6 @@ async def main_handler(message: Message, state: FSMContext):
             lines.append(
                 f"{row['dt'].strftime('%d.%m %H:%M')} - {row['home']} vs {row['away']}\n"
                 f"🏆 {row['league']} | ⭐ {row['team_name']}"
-            )
-        await message.answer(t(lang, "next5_title") + "\n\n" + "\n\n".join(lines))
-        return
-
-        timezone_name = user["timezone"]
-        timezone_obj = pytz.timezone(timezone_name)
-        now_local = datetime.now(timezone_obj)
-        upcoming = []
-
-        seen_fixture_ids = set()
-        for team_id, team_name in favorites:
-            fixtures = await get_fixtures(int(team_id), days=60)
-            team_form = await get_team_form(int(team_id))
-            for fixture in fixtures:
-                fixture_id = int(fixture["fixture"]["id"])
-                if fixture_id in seen_fixture_ids:
-                    continue
-                dt_utc = parse_utc_datetime(fixture["fixture"]["date"])
-                dt_local = dt_utc.astimezone(timezone_obj)
-                if dt_local <= now_local:
-                    continue
-                seen_fixture_ids.add(fixture_id)
-                upcoming.append(
-                    {
-                        "dt": dt_local,
-                        "home": fixture["teams"]["home"]["name"],
-                        "away": fixture["teams"]["away"]["name"],
-                        "league": fixture["league"]["name"],
-                        "team_name": team_name,
-                        "form": team_form,
-                    }
-                )
-
-        if not upcoming:
-            # Final fallback: query all favorites with wider window once more.
-            for team_id, team_name in favorites:
-                fixtures = await get_fixtures(int(team_id), days=120)
-                team_form = await get_team_form(int(team_id))
-                for fixture in fixtures:
-                    fixture_id = int(fixture["fixture"]["id"])
-                    if fixture_id in seen_fixture_ids:
-                        continue
-                    dt_local = parse_utc_datetime(fixture["fixture"]["date"]).astimezone(timezone_obj)
-                    if dt_local <= now_local:
-                        continue
-                    seen_fixture_ids.add(fixture_id)
-                    upcoming.append(
-                        {
-                            "dt": dt_local,
-                            "home": fixture["teams"]["home"]["name"],
-                            "away": fixture["teams"]["away"]["name"],
-                            "league": fixture["league"]["name"],
-                            "team_name": team_name,
-                            "form": team_form,
-                        }
-                    )
-        if not upcoming:
-            played = []
-            seen_last_ids = set()
-            for team_id, team_name in favorites:
-                fixtures = await get_last_fixtures(int(team_id), count=8)
-                team_form = await get_team_form(int(team_id))
-                for fixture in fixtures:
-                    fixture_id = int(fixture["fixture"]["id"])
-                    if fixture_id in seen_last_ids:
-                        continue
-                    dt_local = parse_utc_datetime(fixture["fixture"]["date"]).astimezone(timezone_obj)
-                    seen_last_ids.add(fixture_id)
-                    hg = fixture.get("goals", {}).get("home")
-                    ag = fixture.get("goals", {}).get("away")
-                    played.append(
-                        {
-                            "dt": dt_local,
-                            "home": fixture["teams"]["home"]["name"],
-                            "away": fixture["teams"]["away"]["name"],
-                            "league": fixture["league"]["name"],
-                            "team_name": team_name,
-                            "form": team_form,
-                            "score": f"{hg}-{ag}" if hg is not None and ag is not None else "N/A",
-                        }
-                    )
-            if not played:
-                await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье.")
-                return
-            last5 = sorted(played, key=lambda row: row["dt"], reverse=True)[:5]
-            lines = []
-            for row in last5:
-                lines.append(
-                    f"{row['dt'].strftime('%d.%m %H:%M')} - {row['home']} vs {row['away']} ({row['score']})\n"
-                    f"🏆 {row['league']} | ⭐ {row['team_name']} | form: {row['form']}"
-                )
-            await message.answer(t(lang, "next5_last_title") + "\n\n" + "\n\n".join(lines))
-            return
-
-        top5 = sorted(
-            upcoming,
-            key=lambda row: row["dt"],
-        )[:5]
-        lines = []
-        for row in top5:
-            lines.append(
-                f"{row['dt'].strftime('%d.%m %H:%M')} - {row['home']} vs {row['away']}\n"
-                f"🏆 {row['league']} | ⭐ {row['team_name']} | form: {row['form']}"
             )
         await message.answer(t(lang, "next5_title") + "\n\n" + "\n\n".join(lines))
         return
