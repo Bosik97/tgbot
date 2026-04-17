@@ -22,7 +22,7 @@ from database import (
     save_prediction,
 )
 from keyboards import MENU_TEXTS, language_kb, main_menu, settings_kb_localized
-from utils import get_city_timezone, get_fixture_by_id, get_fixtures, get_h2h, get_next_fixtures, is_top_match, normalize_lang, search_teams, t, validate_timezone
+from utils import get_city_timezone, get_fixture_by_id, get_fixtures, get_h2h, get_last_fixtures, get_next_fixtures, is_top_match, normalize_lang, search_teams, t, validate_timezone
 from utils import get_team_form, parse_utc_datetime
 
 router = Router()
@@ -208,7 +208,26 @@ async def settings_callback(callback: CallbackQuery, state: FSMContext):
 async def set_timezone_handler(message: Message, state: FSMContext):
     user = ensure_user(message.from_user.id, message.from_user.username)
     lang = normalize_lang(user["language"])
-    timezone_name = (message.text or "").strip()
+    menu = MENU_TEXTS.get(lang, MENU_TEXTS["en"])
+    text = (message.text or "").strip()
+
+    # Allow leaving timezone input mode using menu buttons.
+    if text in {
+        menu["teams"],
+        menu["add"],
+        menu["today"],
+        menu["next5"],
+        menu["center"],
+        menu["weekend"],
+        menu["fantasy"],
+        menu["league"],
+        menu["settings"],
+    }:
+        await state.clear()
+        await message.answer(t(lang, "main_hint"), reply_markup=main_menu(lang))
+        return
+
+    timezone_name = text
     if not validate_timezone(timezone_name):
         await message.answer(t(lang, "invalid_timezone"))
         return
@@ -516,7 +535,41 @@ async def main_handler(message: Message, state: FSMContext):
                         }
                     )
         if not upcoming:
-            await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье.")
+            played = []
+            seen_last_ids = set()
+            for team_id, team_name in favorites:
+                fixtures = await get_last_fixtures(int(team_id), count=8)
+                team_form = await get_team_form(int(team_id))
+                for fixture in fixtures:
+                    fixture_id = int(fixture["fixture"]["id"])
+                    if fixture_id in seen_last_ids:
+                        continue
+                    dt_local = parse_utc_datetime(fixture["fixture"]["date"]).astimezone(timezone_obj)
+                    seen_last_ids.add(fixture_id)
+                    hg = fixture.get("goals", {}).get("home")
+                    ag = fixture.get("goals", {}).get("away")
+                    played.append(
+                        {
+                            "dt": dt_local,
+                            "home": fixture["teams"]["home"]["name"],
+                            "away": fixture["teams"]["away"]["name"],
+                            "league": fixture["league"]["name"],
+                            "team_name": team_name,
+                            "form": team_form,
+                            "score": f"{hg}-{ag}" if hg is not None and ag is not None else "N/A",
+                        }
+                    )
+            if not played:
+                await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье.")
+                return
+            last5 = sorted(played, key=lambda row: row["dt"], reverse=True)[:5]
+            lines = []
+            for row in last5:
+                lines.append(
+                    f"{row['dt'].strftime('%d.%m %H:%M')} - {row['home']} vs {row['away']} ({row['score']})\n"
+                    f"🏆 {row['league']} | ⭐ {row['team_name']} | form: {row['form']}"
+                )
+            await message.answer(t(lang, "next5_last_title") + "\n\n" + "\n\n".join(lines))
             return
 
         top5 = sorted(
