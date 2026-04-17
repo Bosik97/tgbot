@@ -80,27 +80,38 @@ async def search_teams(query: str):
     if not query:
         return []
 
-    results = await _search_teams_raw(query)
+    try:
+        results = await _search_teams_raw(query)
+    except Exception as e:
+        print(f"Search teams error: {e}")
+        results = []
 
     alias_query = TEAM_QUERY_ALIASES.get(query.lower())
     if alias_query:
-        alias_results = await _search_teams_raw(alias_query)
-        results = _merge_team_results(results, alias_results)
+        try:
+            alias_results = await _search_teams_raw(alias_query)
+            results = _merge_team_results(results, alias_results)
+        except Exception:
+            pass
 
-    # Fallback for Cyrillic input (RU/KK): transliterate and retry.
     if _looks_cyrillic(query):
         translit_query = translit_cyrillic_to_latin(query)
         if translit_query and translit_query.lower() != query.lower():
-            fallback_results = await _search_teams_raw(translit_query)
-            results = _merge_team_results(results, fallback_results)
+            try:
+                fallback_results = await _search_teams_raw(translit_query)
+                results = _merge_team_results(results, fallback_results)
+            except Exception:
+                pass
 
     return results[:8]
 
 
 async def get_fixtures(team_id: int, days: int = 14):
+    current_year = datetime.now(timezone.utc).year
+    season = current_year if datetime.now(timezone.utc).month >= 8 else current_year - 1
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     until = (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%d")
-    url = f"{API_BASE_URL}/fixtures?team={team_id}&from={today}&to={until}"
+    url = f"{API_BASE_URL}/fixtures?team={team_id}&season={season}&from={today}&to={until}"
     payload = await _api_get(url, ttl_seconds=90)
     return payload.get("response", [])
 
@@ -127,7 +138,8 @@ async def get_upcoming_fixtures(team_id: int, limit: int = 10):
     # - Avoid `next` parameter
     # - Query only allowed seasons, then filter upcoming locally.
     # Default free-plan season window is typically 2022..2024.
-    candidate_seasons = [2024, 2023, 2022]
+    current_year = datetime.now(timezone.utc).year
+    candidate_seasons = [current_year, current_year - 1, current_year - 2, current_year - 3, current_year - 4]
     all_upcoming = []
 
     for season in candidate_seasons:
@@ -290,20 +302,28 @@ async def _api_get(url: str, ttl_seconds: int = 120) -> dict:
         cached = _api_cache.get(url)
         if cached and cached["expires_at"] > now:
             return cached["payload"]
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=20) as resp:
-                payload = await resp.json()
-                if payload.get("errors"):
-                    print(f"API-Football warning for {url}: {payload.get('errors')}")
-                _api_cache[url] = {
-                    "expires_at": now + timedelta(seconds=ttl_seconds),
-                    "payload": payload,
-                }
-                return payload
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=20) as resp:
+                    payload = await resp.json()
+                    if payload.get("errors"):
+                        print(f"API-Football warning for {url}: {payload.get('errors')}")
+                    _api_cache[url] = {
+                        "expires_at": now + timedelta(seconds=ttl_seconds),
+                        "payload": payload,
+                    }
+                    return payload
+        except Exception as e:
+            print(f"API request failed: {url}, error: {e}")
+            return {}
 
 
 async def _search_teams_raw(query: str):
-    payload = await _api_get(f"{API_BASE_URL}/teams?search={query}", ttl_seconds=600)
+    current_year = datetime.now(timezone.utc).year
+    season = current_year if datetime.now(timezone.utc).month >= 8 else current_year - 1
+    payload = await _api_get(f"{API_BASE_URL}/teams?search={query}&season={season}", ttl_seconds=600)
+    if not payload.get("response"):
+        payload = await _api_get(f"{API_BASE_URL}/teams?search={query}", ttl_seconds=600)
     return payload.get("response", [])
 
 

@@ -518,11 +518,8 @@ async def main_handler(message: Message, state: FSMContext):
         upcoming = []
 
         seen_fixture_ids = set()
-        diagnostics = []
         for team_id, team_name in favorites:
-            fixtures, diag = await get_upcoming_fixtures(int(team_id), limit=10)
-            if diag:
-                diagnostics.append(f"{team_name}: {diag}")
+            fixtures = await get_fixtures(int(team_id), days=60)
             team_form = await get_team_form(int(team_id))
             for fixture in fixtures:
                 fixture_id = int(fixture["fixture"]["id"])
@@ -593,11 +590,7 @@ async def main_handler(message: Message, state: FSMContext):
                         }
                     )
             if not played:
-                debug_tail = ""
-                if diagnostics:
-                    # Keep user-facing diagnostic short and readable.
-                    debug_tail = "\nИсточник не вернул матчи (возможен лимит API/план/межсезонье)."
-                await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье." + debug_tail)
+                await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье.")
                 return
             last5 = sorted(played, key=lambda row: row["dt"], reverse=True)[:5]
             lines = []
