@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime
 
 conn = sqlite3.connect('bot.db', check_same_thread=False)
 c = conn.cursor()
@@ -15,6 +16,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS favorites (
     user_id INTEGER,
     team_id INTEGER,
     team_name TEXT,
+    league_id INTEGER,
     PRIMARY KEY (user_id, team_id)
 )''')
 
@@ -24,15 +26,7 @@ def get_user(user_id):
     c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     return c.fetchone()
 
-def save_user(user_id, username, language='ru', city=None, timezone=None):
+def save_user(user_id, username, city=None, timezone=None, language='ru'):
     c.execute("INSERT OR REPLACE INTO users VALUES (?,?,?,?,?)", 
               (user_id, username, language, city, timezone))
     conn.commit()
-
-def add_favorite(user_id, team_id, team_name):
-    c.execute("INSERT OR IGNORE INTO favorites VALUES (?,?,?)", (user_id, team_id, team_name))
-    conn.commit()
-
-def get_favorites(user_id):
-    c.execute("SELECT team_id, team_name FROM favorites WHERE user_id=?", (user_id,))
-    return c.fetchall()
