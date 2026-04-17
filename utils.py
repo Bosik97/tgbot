@@ -27,6 +27,29 @@ CYRILLIC_TO_LATIN = {
     "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
     "і": "i", "ң": "n", "ғ": "g", "ү": "u", "ұ": "u", "қ": "k", "ө": "o", "һ": "h",
 }
+TEAM_QUERY_ALIASES = {
+    "челси": "chelsea",
+    "ман сити": "manchester city",
+    "манчестер сити": "manchester city",
+    "ман юнайтед": "manchester united",
+    "манчестер юнайтед": "manchester united",
+    "ливерпуль": "liverpool",
+    "арсенал": "arsenal",
+    "тоттенхэм": "tottenham",
+    "барселона": "barcelona",
+    "реал": "real madrid",
+    "реал мадрид": "real madrid",
+    "атлетико": "atletico madrid",
+    "бавария": "bayern munich",
+    "псж": "paris saint germain",
+    "интер": "inter",
+    "милан": "milan",
+    "ювентус": "juventus",
+    "ростов": "fc rostov",
+    "зенит": "zenit",
+    "спартак": "spartak moscow",
+    "цска": "cska moscow",
+}
 
 
 def t(lang: str, key: str, **kwargs) -> str:
@@ -58,6 +81,11 @@ async def search_teams(query: str):
         return []
 
     results = await _search_teams_raw(query)
+
+    alias_query = TEAM_QUERY_ALIASES.get(query.lower())
+    if alias_query:
+        alias_results = await _search_teams_raw(alias_query)
+        results = _merge_team_results(results, alias_results)
 
     # Fallback for Cyrillic input (RU/KK): transliterate and retry.
     if _looks_cyrillic(query):
@@ -93,42 +121,43 @@ async def get_upcoming_fixtures(team_id: int, limit: int = 10):
     Returns tuple: (fixtures, diagnostic_message_or_empty)
     """
     diagnostics = []
+    now_utc = datetime.now(timezone.utc)
 
-    # 1) Preferred API-Football way.
-    payload = await _api_get(f"{API_BASE_URL}/fixtures?team={team_id}&next={limit}", ttl_seconds=90)
-    fixtures = payload.get("response", [])
-    if fixtures:
-        return fixtures, ""
-    err = _extract_api_errors(payload)
-    if err:
-        diagnostics.append(f"next={err}")
+    # Free plan friendly strategy:
+    # - Avoid `next` parameter
+    # - Query only allowed seasons, then filter upcoming locally.
+    # Default free-plan season window is typically 2022..2024.
+    candidate_seasons = [2024, 2023, 2022]
+    all_upcoming = []
 
-    # 2) Wide date range fallback.
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    until = (datetime.now(timezone.utc) + timedelta(days=365)).strftime("%Y-%m-%d")
-    payload = await _api_get(f"{API_BASE_URL}/fixtures?team={team_id}&from={today}&to={until}", ttl_seconds=90)
-    fixtures = payload.get("response", [])
-    if fixtures:
-        return fixtures[:limit], ""
-    err = _extract_api_errors(payload)
-    if err:
-        diagnostics.append(f"range={err}")
-
-    # 3) Season fallback (current and next year).
-    current_year = datetime.now(timezone.utc).year
-    for season in (current_year, current_year + 1):
+    for season in candidate_seasons:
         payload = await _api_get(
-            f"{API_BASE_URL}/fixtures?team={team_id}&season={season}&status=NS",
+            f"{API_BASE_URL}/fixtures?team={team_id}&season={season}",
             ttl_seconds=600,
         )
         fixtures = payload.get("response", [])
         if fixtures:
-            return fixtures[:limit], ""
-        err = _extract_api_errors(payload)
-        if err:
-            diagnostics.append(f"season_{season}={err}")
+            for fixture in fixtures:
+                date_raw = fixture.get("fixture", {}).get("date")
+                if not date_raw:
+                    continue
+                try:
+                    dt_utc = parse_utc_datetime(date_raw)
+                except Exception:
+                    continue
+                if dt_utc > now_utc:
+                    all_upcoming.append(fixture)
+        else:
+            err = _extract_api_errors(payload)
+            if err:
+                diagnostics.append(f"season_{season}={err}")
 
-    return [], " | ".join(diagnostics[:3])
+    if all_upcoming:
+        # sort by kickoff time ascending
+        all_upcoming.sort(key=lambda fx: parse_utc_datetime(fx["fixture"]["date"]))
+        return all_upcoming[:limit], ""
+
+    return [], " | ".join(diagnostics[:4])
 
 
 async def get_api_status() -> dict:
