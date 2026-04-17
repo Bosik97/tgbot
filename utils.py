@@ -80,19 +80,26 @@ async def search_teams(query: str):
     if not query:
         return []
 
+    print(f"[DEBUG] Searching teams for: '{query}'")
     results = await _search_teams_raw(query)
+    print(f"[DEBUG] Primary search returned {len(results)} results")
 
     alias_query = TEAM_QUERY_ALIASES.get(query.lower())
     if alias_query:
+        print(f"[DEBUG] Trying alias: '{alias_query}'")
         alias_results = await _search_teams_raw(alias_query)
         results = _merge_team_results(results, alias_results)
+        print(f"[DEBUG] After alias: {len(results)} results")
 
     if _looks_cyrillic(query):
         translit_query = translit_cyrillic_to_latin(query)
         if translit_query and translit_query.lower() != query.lower():
+            print(f"[DEBUG] Trying translit: '{translit_query}'")
             fallback_results = await _search_teams_raw(translit_query)
             results = _merge_team_results(results, fallback_results)
+            print(f"[DEBUG] After translit: {len(results)} results")
 
+    print(f"[DEBUG] Final results: {[r.get('team', {}).get('name') for r in results[:8]]}")
     return results[:8]
 
 
@@ -282,32 +289,39 @@ async def _api_get(url: str, ttl_seconds: int = 120) -> dict:
     now = datetime.now(timezone.utc)
     cached = _api_cache.get(url)
     if cached and cached["expires_at"] > now:
+        print(f"[DEBUG CACHE] HIT: {url}")
         return cached["payload"]
 
     async with _api_lock:
-        # Re-check after waiting the semaphore.
         cached = _api_cache.get(url)
         if cached and cached["expires_at"] > now:
             return cached["payload"]
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers, timeout=20) as resp:
+                    print(f"[DEBUG API] Status: {resp.status}, URL: {url}")
                     payload = await resp.json()
                     if payload.get("errors"):
-                        print(f"API-Football warning for {url}: {payload.get('errors')}")
+                        print(f"[DEBUG API] Errors: {payload.get('errors')}")
                     _api_cache[url] = {
                         "expires_at": now + timedelta(seconds=ttl_seconds),
                         "payload": payload,
                     }
                     return payload
         except Exception as e:
-            print(f"API request failed: {url}, error: {e}")
+            print(f"[DEBUG API] Exception: {e}")
             return {}
 
 
 async def _search_teams_raw(query: str):
-    payload = await _api_get(f"{API_BASE_URL}/teams?search={query}", ttl_seconds=600)
-    return payload.get("response", [])
+    url = f"{API_BASE_URL}/teams?search={query}"
+    print(f"[DEBUG API] GET {url}")
+    payload = await _api_get(url, ttl_seconds=600)
+    response = payload.get("response", [])
+    print(f"[DEBUG API] Response keys: {list(payload.keys())}, response count: {len(response)}")
+    if payload.get("errors"):
+        print(f"[DEBUG API] Errors: {payload.get('errors')}")
+    return response
 
 
 def _looks_cyrillic(value: str) -> bool:
