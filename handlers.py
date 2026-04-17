@@ -22,7 +22,7 @@ from database import (
     save_prediction,
 )
 from keyboards import MENU_TEXTS, language_kb, main_menu, settings_kb_localized
-from utils import get_city_timezone, get_fixture_by_id, get_fixtures, get_h2h, is_top_match, normalize_lang, search_teams, t, validate_timezone
+from utils import get_city_timezone, get_fixture_by_id, get_fixtures, get_h2h, get_next_fixtures, is_top_match, normalize_lang, search_teams, t, validate_timezone
 from utils import get_team_form, parse_utc_datetime
 
 router = Router()
@@ -466,14 +466,21 @@ async def main_handler(message: Message, state: FSMContext):
         now_local = datetime.now(timezone_obj)
         upcoming = []
 
+        seen_fixture_ids = set()
         for team_id, team_name in favorites:
-            fixtures = await get_fixtures(int(team_id), days=14)
+            fixtures = await get_next_fixtures(int(team_id), count=8)
+            if not fixtures:
+                fixtures = await get_fixtures(int(team_id), days=60)
             team_form = await get_team_form(int(team_id))
             for fixture in fixtures:
+                fixture_id = int(fixture["fixture"]["id"])
+                if fixture_id in seen_fixture_ids:
+                    continue
                 dt_utc = parse_utc_datetime(fixture["fixture"]["date"])
                 dt_local = dt_utc.astimezone(timezone_obj)
                 if dt_local <= now_local:
                     continue
+                seen_fixture_ids.add(fixture_id)
                 upcoming.append(
                     {
                         "dt": dt_local,
@@ -486,7 +493,30 @@ async def main_handler(message: Message, state: FSMContext):
                 )
 
         if not upcoming:
-            await message.answer(t(lang, "next5_empty"))
+            # Final fallback: query all favorites with wider window once more.
+            for team_id, team_name in favorites:
+                fixtures = await get_fixtures(int(team_id), days=120)
+                team_form = await get_team_form(int(team_id))
+                for fixture in fixtures:
+                    fixture_id = int(fixture["fixture"]["id"])
+                    if fixture_id in seen_fixture_ids:
+                        continue
+                    dt_local = parse_utc_datetime(fixture["fixture"]["date"]).astimezone(timezone_obj)
+                    if dt_local <= now_local:
+                        continue
+                    seen_fixture_ids.add(fixture_id)
+                    upcoming.append(
+                        {
+                            "dt": dt_local,
+                            "home": fixture["teams"]["home"]["name"],
+                            "away": fixture["teams"]["away"]["name"],
+                            "league": fixture["league"]["name"],
+                            "team_name": team_name,
+                            "form": team_form,
+                        }
+                    )
+        if not upcoming:
+            await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье.")
             return
 
         top5 = sorted(
@@ -548,7 +578,14 @@ async def main_handler(message: Message, state: FSMContext):
         await message.answer(t(lang, "fantasy_title") + "\n" + "\n".join(lines))
         return
 
-    if text == menu["league"]:
+    is_league_click = (
+        text == menu["league"]
+        or "мини-лига" in text.lower()
+        or "мини лига" in text.lower()
+        or "mini league" in text.lower()
+        or "мини-лига" in text.lower()
+    )
+    if is_league_click:
         friends = get_friends(message.from_user.id)
         members = [message.from_user.id] + friends
         board = []

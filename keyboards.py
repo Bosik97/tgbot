@@ -80,6 +80,10 @@ def settings_kb_localized(user, lang: str):
             "change_before_minutes": "Изменить минуты до матча",
             "change_quiet_range": "Изменить тихие часы",
             "change_timezone": "Изменить таймзону",
+            "profile_calm": "Профиль: Спокойный",
+            "profile_standard": "Стандарт",
+            "profile_hardcore": "Хардкор",
+            "live_events": "Live-события ВКЛ/ВЫКЛ",
         },
         "kk": {
             "day_notify": "Матч күні хабарлама",
@@ -90,6 +94,10 @@ def settings_kb_localized(user, lang: str):
             "change_before_minutes": "Матчқа дейінгі минуттарды өзгерту",
             "change_quiet_range": "Тыныш сағаттарды өзгерту",
             "change_timezone": "Уақыт белдеуін өзгерту",
+            "profile_calm": "Профиль: Тыныш",
+            "profile_standard": "Стандарт",
+            "profile_hardcore": "Хардкор",
+            "live_events": "Live-оқиғалар ҚОС/ӨШІК",
         },
         "en": {
             "day_notify": "Day notify",
@@ -100,6 +108,10 @@ def settings_kb_localized(user, lang: str):
             "change_before_minutes": "Change before minutes",
             "change_quiet_range": "Change quiet range",
             "change_timezone": "Change timezone",
+            "profile_calm": "Profile: Calm",
+            "profile_standard": "Standard",
+            "profile_hardcore": "Hardcore",
+            "live_events": "Live events ON/OFF",
         },
     }
     lang_pack = labels.get(lang, labels["en"])
@@ -138,7 +150,11 @@ def settings_kb_localized(user, lang: str):
             [InlineKeyboardButton(text=lang_pack["change_before_minutes"], callback_data="set_before_minutes")],
             [InlineKeyboardButton(text=lang_pack["change_quiet_range"], callback_data="set_quiet_range")],
             [InlineKeyboardButton(text=lang_pack["change_timezone"], callback_data="set_timezone")],
-            [InlineKeyboardButton(text="Profile: Calm", callback_data="set_profile_calm"), InlineKeyboardButton(text="Standard", callback_data="set_profile_standard"), InlineKeyboardButton(text="Hardcore", callback_data="set_profile_hardcore")],
-            [InlineKeyboardButton(text="Live events ON/OFF", callback_data="set_toggle_live_events")],
+            [
+                InlineKeyboardButton(text=lang_pack["profile_calm"], callback_data="set_profile_calm"),
+                InlineKeyboardButton(text=lang_pack["profile_standard"], callback_data="set_profile_standard"),
+                InlineKeyboardButton(text=lang_pack["profile_hardcore"], callback_data="set_profile_hardcore"),
+            ],
+            [InlineKeyboardButton(text=lang_pack["live_events"], callback_data="set_toggle_live_events")],
         ]
     )

@@ -77,6 +77,11 @@ async def get_fixtures(team_id: int, days: int = 14):
     return payload.get("response", [])
 
 
+async def get_next_fixtures(team_id: int, count: int = 5):
+    payload = await _api_get(f"{API_BASE_URL}/fixtures?team={team_id}&next={count}", ttl_seconds=90)
+    return payload.get("response", [])
+
+
 async def get_team_form(team_id: int, last: int = 5) -> str:
     url = f"{API_BASE_URL}/fixtures?team={team_id}&last={last}"
     payload = await _api_get(url, ttl_seconds=3600)
