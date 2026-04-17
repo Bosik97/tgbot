@@ -1,11 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import pytz
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from config import ADMIN_ID, LANGUAGES
+from config import ADMIN_ID, LANGUAGES, DEFAULT_TIMEZONE
 from database import (
     add_favorite,
     ensure_user,
@@ -20,10 +20,18 @@ from database import (
     get_friends,
     get_total_points,
     save_prediction,
+    add_fixture,
+    get_fixture_by_local_id,
+    get_fixtures_by_team,
+    get_all_upcoming_fixtures,
+    update_fixture_score,
+    delete_fixture,
+    get_fixtures_in_range,
+    get_last_fixtures_by_team,
+    get_all_fixtures_count,
 )
 from keyboards import MENU_TEXTS, language_kb, main_menu, settings_kb_localized
-from utils import get_api_status, get_city_timezone, get_fixture_by_id, get_fixtures, get_h2h, get_last_fixtures, get_upcoming_fixtures, is_top_match, normalize_lang, search_teams, t, validate_timezone
-from utils import get_team_form, parse_utc_datetime
+from utils import get_city_timezone, is_top_match, normalize_lang, parse_utc_datetime, t, validate_timezone
 
 router = Router()
 
@@ -37,6 +45,157 @@ class UserState(StatesGroup):
     waiting_quiet_range = State()
     waiting_broadcast = State()
     waiting_add_friend = State()
+    waiting_fixture_score = State()
+
+
+@router.message(Command("addfixture"))
+async def cmd_add_fixture(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(t("en", "admin_denied"))
+        return
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "Используйте: /addfixture <Команда1 - Команда2 | Лига | ГГГГ-ММ-ДД ЧЧ:ММ | Статус | Счет (опционально)>\n"
+            "Пример: /addfixture Chelsea - Real Madrid | Premier League | 2026-04-25 20:00 | scheduled | 2-1"
+        )
+        return
+    data = args[1].strip()
+    try:
+        parts = [p.strip() for p in data.split("|")]
+        if len(parts) < 4:
+            raise ValueError("Требуется минимум 4 раздела, разделенных |")
+        teams_part = parts[0]
+        league = parts[1]
+        datetime_part = parts[2]
+        status = parts[3] if len(parts) > 3 else "scheduled"
+        score_part = parts[4] if len(parts) > 4 else None
+
+        if "-" not in teams_part:
+            raise ValueError("Формат команд: Команда1 - Команда2")
+        home_team, away_team = [t.strip() for t in teams_part.split("-", 1)]
+
+        # Parse datetime with multiple formats
+        try:
+            match_date = datetime.strptime(datetime_part, "%Y-%m-%d %H:%M")
+        except ValueError:
+            try:
+                match_date = datetime.fromisoformat(datetime_part.replace(" ", "T"))
+            except ValueError:
+                raise ValueError("Формат даты: ГГГГ-ММ-ДД ЧЧ:ММ")
+        if match_date.tzinfo is None:
+            match_date = match_date.replace(tzinfo=timezone.utc)
+
+        score_home = None
+        score_away = None
+        if score_part and "-" in score_part:
+            h, a = map(int, score_part.split("-", 1))
+            score_home = h
+            score_away = a
+
+        fixture_id = add_fixture(
+            home_team_name=home_team,
+            away_team_name=away_team,
+            league=league,
+            match_date_utc=match_date.isoformat(),
+            status=status,
+            score_home=score_home,
+            score_away=score_away,
+            added_by=message.from_user.id,
+        )
+        await message.answer(f"Матч добавлен (ID: {fixture_id})")
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+
+@router.message(Command("setscore"))
+async def cmd_set_score(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(t("en", "admin_denied"))
+        return
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer("Использование: /setscore <ID> <счет>\nПример: /setscore 5 2-1 или /setscore 5 FT")
+        return
+    try:
+        fixture_id = int(args[1])
+        score_text = args[2]
+        fixture = get_fixture_by_local_id(fixture_id)
+        if not fixture:
+            await message.answer("Матч не найден")
+            return
+        if score_text.upper() in {"FT", "AET", "PEN", "NS", "LIVE"}:
+            update_fixture_score(fixture_id, None, None, status=score_text.upper())
+            await message.answer(f"Статус матча обновлен: {score_text}")
+        else:
+            if "-" not in score_text:
+                await message.answer("Счет должен быть в формате 2-1")
+                return
+            h, a = map(int, score_text.split("-", 1))
+            update_fixture_score(fixture_id, h, a, "finished")
+            await message.answer(f"Счет обновлен: {h}-{a}")
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+
+@router.message(Command("matches"))
+async def cmd_matches(message: Message):
+    user = ensure_user(message.from_user.id, message.from_user.username)
+    lang = normalize_lang(user["language"])
+    timezone_name = user["timezone"] or DEFAULT_TIMEZONE
+    tz = pytz.timezone(timezone_name)
+    now_local = datetime.now(tz)
+
+    favorites = get_favorites(message.from_user.id)
+    if not favorites:
+        await message.answer(t(lang, "teams_empty"))
+        return
+
+    lines = []
+    for team_id, team_name in favorites:
+        fixtures = get_fixtures_by_team(team_name, days=30)
+        if fixtures:
+            for fixture in fixtures:
+                dt_utc = parse_utc_datetime(fixture["match_date_utc"])
+                dt_local = dt_utc.astimezone(tz)
+                score = ""
+                if fixture["score_home"] is not None and fixture["score_away"] is not None:
+                    score = f" ({fixture['score_home']}-{fixture['score_away']})"
+                status = "🔴" if fixture["status"] == "live" else "✅" if fixture["status"] == "finished" else ""
+                lines.append(
+                    f"{status} {dt_local.strftime('%d.%m %H:%M')} - {fixture['home_team_name']} vs {fixture['away_team_name']}{score}\n"
+                    f"🏆 {fixture['league']}"
+                )
+
+    all_fixtures = get_all_upcoming_fixtures(limit=10)
+    if all_fixtures and not lines:
+        await message.answer("Ближайшие матчи:")
+        for fixture in all_fixtures[:10]:
+            dt_utc = parse_utc_datetime(fixture["match_date_utc"])
+            dt_local = dt_utc.astimezone(tz)
+            lines.append(f"{dt_local.strftime('%d.%m %H:%M')} - {fixture['home_team_name']} vs {fixture['away_team_name']} ({fixture['league']})")
+
+    if not lines:
+        await message.answer("Матчей не найдено")
+        return
+
+    await message.answer("\n\n".join(lines[:15]))
+
+
+@router.message(Command("allmatches"))
+async def cmd_all_matches(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(t("en", "admin_denied"))
+        return
+    fixtures = get_all_upcoming_fixtures(limit=50)
+    if not fixtures:
+        await message.answer("Матчей нет")
+        return
+    lines = []
+    for f in fixtures:
+        dt = parse_utc_datetime(f["match_date_utc"]).strftime("%d.%m %H:%M")
+        lines.append(f"ID{f['id']}: {dt} {f['home_team_name']} - {f['away_team_name']} ({f['league']}) [{f['status']}]")
+    await message.answer("\n".join(lines[:30]))
 
 
 def register_handlers(dp):
@@ -109,31 +268,12 @@ async def admin_broadcast(message: Message, state: FSMContext):
 async def cmd_apistatus(message: Message):
     user = ensure_user(message.from_user.id, message.from_user.username)
     lang = normalize_lang(user["language"])
-    status = await get_api_status()
-    favorites = get_favorites(message.from_user.id)
-    sample_info = "no favorites"
-    if favorites:
-        team_id, team_name = favorites[0]
-        fixtures, diag = await get_upcoming_fixtures(int(team_id), limit=3)
-        sample_info = f"{team_name}: fixtures={len(fixtures)}"
-        if diag:
-            sample_info += f", diag={diag}"
-
-    text = (
-        f"API status: {'OK' if status['ok'] else 'FAIL'}\n"
-        f"Requests remaining: {status['requests_remaining']}\n"
-        f"Status endpoint results: {status['results']}\n"
-        f"Errors: {status['errors'] or 'none'}\n"
-        f"Sample favorite check: {sample_info}"
-    )
     if lang == "ru":
-        text = (
-            f"Статус API: {'OK' if status['ok'] else 'FAIL'}\n"
-            f"Осталось запросов: {status['requests_remaining']}\n"
-            f"Результаты status endpoint: {status['results']}\n"
-            f"Ошибки: {status['errors'] or 'нет'}\n"
-            f"Проверка избранного: {sample_info}"
-        )
+        text = "API-Football отключен (используется локальная база данных)."
+    elif lang == "kk":
+        text = "API-Football өшірілген (жергілікті дерекқор пайдаланылады)."
+    else:
+        text = "API-Football is disabled (using local database)."
     await message.answer(text)
 
 
@@ -155,23 +295,29 @@ async def do_broadcast(message: Message, state: FSMContext):
     await state.clear()
 
 
-@router.callback_query(F.data.startswith("add_"))
-async def add_team(callback: CallbackQuery):
-    _, team_id, team_name = callback.data.split("_", 2)
-    add_favorite(callback.from_user.id, int(team_id), team_name)
-    user = ensure_user(callback.from_user.id, callback.from_user.username)
-    lang = normalize_lang(user["language"])
-    await callback.message.answer(t(lang, "team_added", team=team_name))
-    await callback.answer()
-
-
 @router.callback_query(F.data.startswith("del_"))
 async def delete_team(callback: CallbackQuery):
-    _, team_id = callback.data.split("_", 1)
-    remove_favorite(callback.from_user.id, int(team_id))
+    team_name = callback.data[4:]  # Extract team name after "del_"
+    remove_favorite(callback.from_user.id, team_name)
     user = ensure_user(callback.from_user.id, callback.from_user.username)
     lang = normalize_lang(user["language"])
     await callback.message.answer(t(lang, "team_removed"))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("add_"))
+async def add_team(callback: CallbackQuery):
+    # Callback data format: add_{team_id}_{team_name} (legacy, team_id ignored)
+    parts = callback.data.split("_", 2)
+    if len(parts) >= 3:
+        team_name = parts[2]
+    else:
+        team_name = parts[1] if len(parts) > 1 else ""
+    if team_name:
+        add_favorite(callback.from_user.id, team_name)
+        user = ensure_user(callback.from_user.id, callback.from_user.username)
+        lang = normalize_lang(user["language"])
+        await callback.message.answer(t(lang, "team_added", team=team_name))
     await callback.answer()
 
 
@@ -269,6 +415,44 @@ async def set_timezone_handler(message: Message, state: FSMContext):
     await state.clear()
 
 
+@router.message(UserState.waiting_quiet_range)
+async def set_quiet_range_handler(message: Message, state: FSMContext):
+    user = ensure_user(message.from_user.id, message.from_user.username)
+    lang = normalize_lang(user["language"])
+    value = (message.text or "").strip().replace(" ", "")
+    if "-" not in value:
+        texts = {
+            "ru": "Формат должен быть ЧЧ-ЧЧ (пример: 23-8).",
+            "kk": "Формат СС-СС болуы керек (мысалы: 23-8).",
+            "en": "Format should be HH-HH (example: 23-8).",
+        }
+        await message.answer(texts.get(lang, texts["en"]))
+        return
+    left, right = value.split("-", 1)
+    if not left.isdigit() or not right.isdigit():
+        texts = {
+            "ru": "Используй только цифры, пример: 23-8.",
+            "kk": "Тек сандарды қолдан, мысалы: 23-8.",
+            "en": "Use numbers only, example: 23-8.",
+        }
+        await message.answer(texts.get(lang, texts["en"]))
+        return
+    start = int(left)
+    end = int(right)
+    if not (0 <= start <= 23 and 0 <= end <= 23):
+        texts = {
+            "ru": "Часы должны быть в диапазоне 0..23.",
+            "kk": "Сағат 0..23 диапазонында болуы керек.",
+            "en": "Hours must be in range 0..23.",
+        }
+        await message.answer(texts.get(lang, texts["en"]))
+        return
+    update_user(message.from_user.id, quiet_start_hour=start, quiet_end_hour=end)
+    await message.answer(t(lang, "quiet_saved", start=start, end=end))
+    await message.answer(t(lang, "main_hint"), reply_markup=main_menu(lang))
+    await state.clear()
+
+
 @router.message(UserState.waiting_day_hour)
 async def set_day_hour_handler(message: Message, state: FSMContext):
     value = (message.text or "").strip()
@@ -321,40 +505,54 @@ async def set_before_minutes_handler(message: Message, state: FSMContext):
     await state.clear()
 
 
-@router.message(UserState.waiting_quiet_range)
-async def set_quiet_range_handler(message: Message, state: FSMContext):
+@router.message(UserState.waiting_day_hour)
+async def set_day_hour_handler(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value.isdigit() or not 0 <= int(value) <= 23:
+        texts = {
+            "ru": "Час должен быть от 0 до 23.",
+            "kk": "Сағат 0 мен 23 аралығында болуы керек.",
+            "en": "Hour should be from 0 to 23.",
+        }
+        user = ensure_user(message.from_user.id, message.from_user.username)
+        lang = normalize_lang(user["language"])
+        await message.answer(texts.get(lang, texts["en"]))
+        return
+    update_user(message.from_user.id, notify_day_hour=int(value))
+    texts = {
+        "ru": "Час дневного уведомления обновлен.",
+        "kk": "Күндізгі хабарлама уақыты жаңартылды.",
+        "en": "Day notification hour updated.",
+    }
     user = ensure_user(message.from_user.id, message.from_user.username)
     lang = normalize_lang(user["language"])
-    value = (message.text or "").strip().replace(" ", "")
-    if "-" not in value:
+    await message.answer(texts.get(lang, texts["en"]))
+    await message.answer(t(lang, "main_hint"), reply_markup=main_menu(lang))
+    await state.clear()
+
+
+@router.message(UserState.waiting_before_minutes)
+async def set_before_minutes_handler(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if not value.isdigit() or not 10 <= int(value) <= 720:
         texts = {
-            "ru": "Формат должен быть ЧЧ-ЧЧ (пример: 23-8).",
-            "kk": "Формат СС-СС болуы керек (мысалы: 23-8).",
-            "en": "Format should be HH-HH (example: 23-8).",
+            "ru": "Минуты должны быть от 10 до 720.",
+            "kk": "Минут 10 бен 720 аралығында болуы керек.",
+            "en": "Minutes should be from 10 to 720.",
         }
+        user = ensure_user(message.from_user.id, message.from_user.username)
+        lang = normalize_lang(user["language"])
         await message.answer(texts.get(lang, texts["en"]))
         return
-    left, right = value.split("-", 1)
-    if not left.isdigit() or not right.isdigit():
-        texts = {
-            "ru": "Используй только цифры, пример: 23-8.",
-            "kk": "Тек сандарды қолдан, мысалы: 23-8.",
-            "en": "Use numbers only, example: 23-8.",
-        }
-        await message.answer(texts.get(lang, texts["en"]))
-        return
-    start = int(left)
-    end = int(right)
-    if not (0 <= start <= 23 and 0 <= end <= 23):
-        texts = {
-            "ru": "Часы должны быть в диапазоне 0..23.",
-            "kk": "Сағат 0..23 диапазонында болуы керек.",
-            "en": "Hours must be in range 0..23.",
-        }
-        await message.answer(texts.get(lang, texts["en"]))
-        return
-    update_user(message.from_user.id, quiet_start_hour=start, quiet_end_hour=end)
-    await message.answer(t(lang, "quiet_saved", start=start, end=end))
+    update_user(message.from_user.id, notify_before_minutes=int(value))
+    texts = {
+        "ru": "Напоминание перед матчем обновлено.",
+        "kk": "Матч алдындағы еске салғыш жаңартылды.",
+        "en": "Before-match reminder updated.",
+    }
+    user = ensure_user(message.from_user.id, message.from_user.username)
+    lang = normalize_lang(user["language"])
+    await message.answer(texts.get(lang, texts["en"]))
     await message.answer(t(lang, "main_hint"), reply_markup=main_menu(lang))
     await state.clear()
 
@@ -375,22 +573,10 @@ async def team_search_from_state(message: Message, state: FSMContext):
         await message.answer(t(lang, "main_hint"), reply_markup=main_menu(lang))
         return
 
-    teams = await search_teams(query)
-    if not teams:
-        await message.answer(t(lang, "search_empty"))
-        return
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=team["team"]["name"],
-                    callback_data=f"add_{team['team']['id']}_{team['team']['name']}",
-                )
-            ]
-            for team in teams
-        ]
-    )
-    await message.answer(t(lang, "select_team"), reply_markup=kb)
+    # Добавляем команду напрямую по названию
+    add_favorite(message.from_user.id, query)
+    await message.answer(t(lang, "team_added", team=query))
+    await message.answer(t(lang, "main_hint"), reply_markup=main_menu(lang))
     await state.clear()
 
 
@@ -419,11 +605,11 @@ async def main_handler(message: Message, state: FSMContext):
             return
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text=f"❌ {name}", callback_data=f"del_{team_id}")]
-                for team_id, name in favorites
+                [InlineKeyboardButton(text=f"❌ {name}", callback_data=f"del_{name}")]
+                for name in favorites
             ]
         )
-        body = "\n".join([f"• {name}" for _, name in favorites])
+        body = "\n".join([f"• {name}" for name in favorites])
         await message.answer(body, reply_markup=kb)
         return
 
@@ -433,18 +619,18 @@ async def main_handler(message: Message, state: FSMContext):
             await message.answer(t(lang, "teams_empty"))
             return
         timezone_name = user["timezone"]
-        now_local = datetime.now(pytz.timezone(timezone_name))
+        tz = pytz.timezone(timezone_name)
+        now_local = datetime.now(tz)
         rows = []
-        for team_id, _ in favorites:
-            fixtures = await get_fixtures(int(team_id), days=1)
+        for team_name in favorites:
+            fixtures = get_fixtures_by_team(team_name, days=1)
             for fixture in fixtures:
-                dt_utc = parse_utc_datetime(fixture["fixture"]["date"])
-                dt_local = dt_utc.astimezone(pytz.timezone(timezone_name))
+                dt_utc = parse_utc_datetime(fixture["match_date_utc"])
+                dt_local = dt_utc.astimezone(tz)
                 if dt_local.date() != now_local.date():
                     continue
-                team_form = await get_team_form(int(team_id))
                 rows.append(
-                    f"{dt_local.strftime('%H:%M')} - {fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']} | form: {team_form}"
+                    f"{dt_local.strftime('%H:%M')} - {fixture['home_team_name']} vs {fixture['away_team_name']}"
                 )
         if not rows:
             await message.answer(t(lang, "today_empty"))
@@ -459,23 +645,24 @@ async def main_handler(message: Message, state: FSMContext):
             await message.answer(t(lang, "teams_empty"))
             return
         timezone_name = user["timezone"]
-        timezone_obj = pytz.timezone(timezone_name)
-        now_local = datetime.now(timezone_obj)
+        tz = pytz.timezone(timezone_name)
+        now_local = datetime.now(tz)
         cards = []
-        for team_id, _ in favorites:
-            fixtures = await get_fixtures(int(team_id), days=2)
+        for team_name in favorites:
+            fixtures = get_fixtures_by_team(team_name, days=2)
             for fixture in fixtures:
-                dt_local = parse_utc_datetime(fixture["fixture"]["date"]).astimezone(timezone_obj)
+                dt_utc = parse_utc_datetime(fixture["match_date_utc"])
+                dt_local = dt_utc.astimezone(tz)
                 if dt_local < now_local:
                     continue
-                home_name = fixture["teams"]["home"]["name"]
-                away_name = fixture["teams"]["away"]["name"]
-                venue = fixture.get("fixture", {}).get("venue", {}).get("name", "N/A")
-                referee = fixture.get("fixture", {}).get("referee") or "N/A"
+                home_name = fixture["home_team_name"]
+                away_name = fixture["away_team_name"]
+                venue = fixture.get("round", "N/A")
+                referee = "N/A"
                 countdown = int((dt_local - now_local).total_seconds() // 60)
-                h2h = await get_h2h(fixture["teams"]["home"]["id"], fixture["teams"]["away"]["id"])
-                home_form = await get_team_form(fixture["teams"]["home"]["id"])
-                away_form = await get_team_form(fixture["teams"]["away"]["id"])
+                h2h = "N/A"
+                home_form = "N/A"
+                away_form = "N/A"
                 text_card = (
                     f"⚽ <b>{home_name} vs {away_name}</b>\n"
                     f"🕒 {dt_local.strftime('%d.%m %H:%M')} ({timezone_name})\n"
@@ -489,11 +676,11 @@ async def main_handler(message: Message, state: FSMContext):
                 )
                 kb = InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text=t(lang, "score_reveal"), callback_data=f"score_{fixture['fixture']['id']}")],
+                        [InlineKeyboardButton(text=t(lang, "score_reveal"), callback_data=f"score_{fixture['id']}")],
                         [
-                            InlineKeyboardButton(text="1", callback_data=f"pred_{fixture['fixture']['id']}_1"),
-                            InlineKeyboardButton(text="X", callback_data=f"pred_{fixture['fixture']['id']}_x"),
-                            InlineKeyboardButton(text="2", callback_data=f"pred_{fixture['fixture']['id']}_2"),
+                            InlineKeyboardButton(text="1", callback_data=f"pred_{fixture['id']}_1"),
+                            InlineKeyboardButton(text="X", callback_data=f"pred_{fixture['id']}_x"),
+                            InlineKeyboardButton(text="2", callback_data=f"pred_{fixture['id']}_2"),
                         ],
                     ]
                 )
@@ -511,6 +698,80 @@ async def main_handler(message: Message, state: FSMContext):
         if not favorites:
             await message.answer(t(lang, "teams_empty"))
             return
+        timezone_name = user["timezone"]
+        tz = pytz.timezone(timezone_name)
+        now_local = datetime.now(tz)
+        upcoming = []
+        seen_fixture_ids = set()
+
+        for team_name in favorites:
+            fixtures = get_fixtures_by_team(team_name, days=60)
+            for fixture in fixtures:
+                fixture_id = fixture["id"]
+                if fixture_id in seen_fixture_ids:
+                    continue
+                dt_utc = parse_utc_datetime(fixture["match_date_utc"])
+                dt_local = dt_utc.astimezone(tz)
+                if dt_local <= now_local:
+                    continue
+                seen_fixture_ids.add(fixture_id)
+                upcoming.append(
+                    {
+                        "dt": dt_local,
+                        "home": fixture["home_team_name"],
+                        "away": fixture["away_team_name"],
+                        "league": fixture["league"],
+                        "team_name": team_name,
+                    }
+                )
+
+        if not upcoming:
+            played = []
+            seen_last_ids = set()
+            for team_name in favorites:
+                fixtures = get_last_fixtures_by_team(team_name, count=8)
+                for fixture in fixtures:
+                    fixture_id = fixture["id"]
+                    if fixture_id in seen_last_ids:
+                        continue
+                    dt_utc = parse_utc_datetime(fixture["match_date_utc"])
+                    dt_local = dt_utc.astimezone(tz)
+                    seen_last_ids.add(fixture_id)
+                    hg = fixture["score_home"]
+                    ag = fixture["score_away"]
+                    score_info = f"{hg}-{ag}" if hg is not None and ag is not None else "N/A"
+                    played.append(
+                        {
+                            "dt": dt_local,
+                            "home": fixture["home_team_name"],
+                            "away": fixture["away_team_name"],
+                            "league": fixture["league"],
+                            "team_name": team_name,
+                            "score": score_info,
+                        }
+                    )
+            if not played:
+                await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье.")
+                return
+            last5 = sorted(played, key=lambda row: row["dt"], reverse=True)[:5]
+            lines = []
+            for row in last5:
+                lines.append(
+                    f"{row['dt'].strftime('%d.%m %H:%M')} - {row['home']} vs {row['away']} ({row['score']})\n"
+                    f"🏆 {row['league']} | ⭐ {row['team_name']}"
+                )
+            await message.answer(t(lang, "next5_last_title") + "\n\n" + "\n\n".join(lines))
+            return
+
+        top5 = sorted(upcoming, key=lambda row: row["dt"])[:5]
+        lines = []
+        for row in top5:
+            lines.append(
+                f"{row['dt'].strftime('%d.%m %H:%M')} - {row['home']} vs {row['away']}\n"
+                f"🏆 {row['league']} | ⭐ {row['team_name']}"
+            )
+        await message.answer(t(lang, "next5_title") + "\n\n" + "\n\n".join(lines))
+        return
 
         timezone_name = user["timezone"]
         timezone_obj = pytz.timezone(timezone_name)
@@ -621,13 +882,14 @@ async def main_handler(message: Message, state: FSMContext):
             await message.answer(t(lang, "teams_empty"))
             return
         timezone_name = user["timezone"]
-        timezone_obj = pytz.timezone(timezone_name)
-        now_local = datetime.now(timezone_obj)
+        tz = pytz.timezone(timezone_name)
+        now_local = datetime.now(tz)
         picks = []
-        for team_id, team_name in favorites:
-            fixtures = await get_fixtures(int(team_id), days=7)
+        for team_name in favorites:
+            fixtures = get_fixtures_by_team(team_name, days=7)
             for fixture in fixtures:
-                dt_local = parse_utc_datetime(fixture["fixture"]["date"]).astimezone(timezone_obj)
+                dt_utc = parse_utc_datetime(fixture["match_date_utc"])
+                dt_local = dt_utc.astimezone(tz)
                 if dt_local.weekday() not in (5, 6):
                     continue
                 if dt_local <= now_local:
@@ -639,26 +901,12 @@ async def main_handler(message: Message, state: FSMContext):
         lines = []
         for dt_local, fixture, team_name in sorted(picks, key=lambda x: x[0])[:8]:
             hot = "🔥" if is_top_match(fixture) else "•"
-            lines.append(f"{hot} {dt_local.strftime('%a %H:%M')} {fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']} ({team_name})")
+            lines.append(f"{hot} {dt_local.strftime('%a %H:%M')} {fixture['home_team_name']} vs {fixture['away_team_name']} ({team_name})")
         await message.answer(t(lang, "weekend_title") + "\n" + "\n".join(lines))
         return
 
     if text == menu["fantasy"]:
-        favorites = get_favorites(message.from_user.id)
-        if not favorites:
-            await message.answer(t(lang, "teams_empty"))
-            return
-        scored = []
-        for team_id, team_name in favorites:
-            form = await get_team_form(int(team_id))
-            wins = form.count("W")
-            scored.append((wins, team_name, form))
-        scored.sort(reverse=True)
-        top = scored[:3]
-        lines = [f"⭐ Капитан-кандидат: {top[0][1]} ({top[0][2]})"] if top else []
-        lines.extend([f"• {name}: form {form}" for _, name, form in top])
-        lines.append("⚠ Ротация: проверяй составы за 1 час до матча.")
-        await message.answer(t(lang, "fantasy_title") + "\n" + "\n".join(lines))
+        await message.answer("Фэнтези-помощник временно недоступен (требуются данные из API).")
         return
 
     is_league_click = (
@@ -689,37 +937,26 @@ async def main_handler(message: Message, state: FSMContext):
         )
         return
 
-    teams = await search_teams(text)
-    if teams:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=team["team"]["name"],
-                        callback_data=f"add_{team['team']['id']}_{team['team']['name']}",
-                    )
-                ]
-                for team in teams
-            ]
-        )
-        await message.answer(t(lang, "select_team"), reply_markup=kb)
-    else:
-        await message.answer(t(lang, "main_hint"))
+    # Если текст не является командой меню — добавляем команду
+    add_favorite(message.from_user.id, None, text)
+    await message.answer(t(lang, "team_added", team=text))
+    await message.answer(t(lang, "main_hint"), reply_markup=main_menu(lang))
 
 
 @router.callback_query(F.data.startswith("score_"))
 async def reveal_score(callback: CallbackQuery):
     fixture_id = int(callback.data.split("_", 1)[1])
-    fixture = await get_fixture_by_id(fixture_id)
+    fixture = get_fixture_by_local_id(fixture_id)
     if not fixture:
         await callback.answer("Матч не найден", show_alert=True)
         return
-    home = fixture["teams"]["home"]["name"]
-    away = fixture["teams"]["away"]["name"]
-    hg = fixture.get("goals", {}).get("home")
-    ag = fixture.get("goals", {}).get("away")
-    status = fixture.get("fixture", {}).get("status", {}).get("long", "N/A")
-    await callback.message.answer(f"📊 <b>{home} {hg}-{ag} {away}</b>\nСтатус: {status}")
+    home = fixture["home_team_name"]
+    away = fixture["away_team_name"]
+    hg = fixture["score_home"]
+    ag = fixture["score_away"]
+    status = fixture["status"]
+    score_text = f"{hg}-{ag}" if hg is not None and ag is not None else "N/A"
+    await callback.message.answer(f"📊 <b>{home} {score_text} {away}</b>\nСтатус: {status}")
     await callback.answer()
 
 
