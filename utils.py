@@ -19,6 +19,14 @@ CITY_TZ_OVERRIDES = {
     "atyrau": "Asia/Atyrau",
     "karaganda": "Asia/Almaty",
 }
+CYRILLIC_TO_LATIN = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "",
+    "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    "і": "i", "ң": "n", "ғ": "g", "ү": "u", "ұ": "u", "қ": "k", "ө": "o", "һ": "h",
+}
 
 
 def t(lang: str, key: str, **kwargs) -> str:
@@ -45,8 +53,20 @@ def validate_timezone(timezone_name: str) -> bool:
 
 
 async def search_teams(query: str):
-    payload = await _api_get(f"{API_BASE_URL}/teams?search={query}", ttl_seconds=600)
-    return payload.get("response", [])[:8]
+    query = query.strip()
+    if not query:
+        return []
+
+    results = await _search_teams_raw(query)
+
+    # Fallback for Cyrillic input (RU/KK): transliterate and retry.
+    if _looks_cyrillic(query):
+        translit_query = translit_cyrillic_to_latin(query)
+        if translit_query and translit_query.lower() != query.lower():
+            fallback_results = await _search_teams_raw(translit_query)
+            results = _merge_team_results(results, fallback_results)
+
+    return results[:8]
 
 
 async def get_fixtures(team_id: int, days: int = 14):
@@ -74,6 +94,50 @@ async def get_team_form(team_id: int, last: int = 5) -> str:
         elif team_id == away_id:
             form.append("W" if away_goals > home_goals else "D" if away_goals == home_goals else "L")
     return "".join(form) if form else "N/A"
+
+
+async def get_fixture_by_id(fixture_id: int) -> dict:
+    payload = await _api_get(f"{API_BASE_URL}/fixtures?id={fixture_id}", ttl_seconds=30)
+    response = payload.get("response", [])
+    return response[0] if response else {}
+
+
+async def get_h2h(home_id: int, away_id: int, last: int = 5) -> str:
+    payload = await _api_get(f"{API_BASE_URL}/fixtures/headtohead?h2h={home_id}-{away_id}&last={last}", ttl_seconds=1800)
+    matches = payload.get("response", [])
+    home_wins = 0
+    away_wins = 0
+    draws = 0
+    for fixture in matches:
+        hg = fixture.get("goals", {}).get("home")
+        ag = fixture.get("goals", {}).get("away")
+        if hg is None or ag is None:
+            continue
+        if hg > ag:
+            home_wins += 1
+        elif ag > hg:
+            away_wins += 1
+        else:
+            draws += 1
+    return f"{home_wins}-{draws}-{away_wins}"
+
+
+def is_top_match(fixture: dict) -> bool:
+    league_round = str(fixture.get("league", {}).get("round", "")).lower()
+    league_name = str(fixture.get("league", {}).get("name", "")).lower()
+    home = str(fixture.get("teams", {}).get("home", {}).get("name", "")).lower()
+    away = str(fixture.get("teams", {}).get("away", {}).get("name", "")).lower()
+    if any(tag in league_round for tag in ["final", "semi", "quarter", "playoff", "play-off"]):
+        return True
+    if any(tag in league_name for tag in ["champions league", "europa league"]):
+        return True
+    derby_keywords = ["derby", "clasico", "classique"]
+    if any(tag in league_round for tag in derby_keywords):
+        return True
+    top_teams = ["real madrid", "barcelona", "manchester city", "arsenal", "liverpool", "bayern", "psg", "inter", "milan", "juventus"]
+    if any(team in home for team in top_teams) and any(team in away for team in top_teams):
+        return True
+    return False
 
 
 async def get_city_timezone(city: str):
@@ -113,3 +177,36 @@ async def _api_get(url: str, ttl_seconds: int = 120) -> dict:
                     "payload": payload,
                 }
                 return payload
+
+
+async def _search_teams_raw(query: str):
+    payload = await _api_get(f"{API_BASE_URL}/teams?search={query}", ttl_seconds=600)
+    return payload.get("response", [])
+
+
+def _looks_cyrillic(value: str) -> bool:
+    return any("а" <= ch.lower() <= "я" or ch.lower() in {"і", "ң", "ғ", "ү", "ұ", "қ", "ө", "һ"} for ch in value)
+
+
+def translit_cyrillic_to_latin(value: str) -> str:
+    out = []
+    for ch in value:
+        lower = ch.lower()
+        mapped = CYRILLIC_TO_LATIN.get(lower, ch)
+        if ch.isupper() and mapped:
+            out.append(mapped[:1].upper() + mapped[1:])
+        else:
+            out.append(mapped)
+    return "".join(out)
+
+
+def _merge_team_results(primary: list, secondary: list) -> list:
+    merged = []
+    seen_ids = set()
+    for item in primary + secondary:
+        team_id = item.get("team", {}).get("id")
+        if team_id in seen_ids:
+            continue
+        seen_ids.add(team_id)
+        merged.append(item)
+    return merged

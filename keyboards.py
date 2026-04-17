@@ -1,23 +1,38 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from config import LANGUAGES
+from config import I18N, LANGUAGES
 
 MENU_TEXTS = {
     "ru": {
         "teams": "Мои команды ⚽",
         "add": "Добавить команду ➕",
         "today": "Сегодня 📅",
+        "next5": I18N["ru"]["next5_button"],
+        "center": "Матч-центр 🎯",
+        "weekend": "Мой уикенд 🗓",
+        "fantasy": "Фэнтези-помощник 🧠",
+        "league": "Мини-лига 🏆",
         "settings": "Настройки ⚙️",
     },
     "kk": {
         "teams": "Менің командаларым ⚽",
         "add": "Команда қосу ➕",
         "today": "Бүгін 📅",
+        "next5": I18N["kk"]["next5_button"],
+        "center": "Матч-орталық 🎯",
+        "weekend": "Менің уикендім 🗓",
+        "fantasy": "Фэнтези көмекші 🧠",
+        "league": "Мини-лига 🏆",
         "settings": "Баптаулар ⚙️",
     },
     "en": {
         "teams": "My Teams ⚽",
         "add": "Add Team ➕",
         "today": "Today 📅",
+        "next5": I18N["en"]["next5_button"],
+        "center": "Match Center 🎯",
+        "weekend": "My Weekend 🗓",
+        "fantasy": "Fantasy Helper 🧠",
+        "league": "Mini League 🏆",
         "settings": "Settings ⚙️",
     },
 }
@@ -28,9 +43,15 @@ def main_menu(lang: str = "ru"):
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=text_map["teams"]), KeyboardButton(text=text_map["add"])],
-            [KeyboardButton(text=text_map["today"]), KeyboardButton(text=text_map["settings"])],
+            [KeyboardButton(text=text_map["today"]), KeyboardButton(text=text_map["next5"])],
+            [KeyboardButton(text=text_map["center"]), KeyboardButton(text=text_map["weekend"])],
+            [KeyboardButton(text=text_map["fantasy"]), KeyboardButton(text=text_map["league"])],
+            [KeyboardButton(text=text_map["settings"])],
         ],
         resize_keyboard=True,
+        one_time_keyboard=False,
+        is_persistent=True,
+        input_field_placeholder="Выбери действие",
     )
 
 def language_kb():
@@ -117,5 +138,7 @@ def settings_kb_localized(user, lang: str):
             [InlineKeyboardButton(text=lang_pack["change_before_minutes"], callback_data="set_before_minutes")],
             [InlineKeyboardButton(text=lang_pack["change_quiet_range"], callback_data="set_quiet_range")],
             [InlineKeyboardButton(text=lang_pack["change_timezone"], callback_data="set_timezone")],
+            [InlineKeyboardButton(text="Profile: Calm", callback_data="set_profile_calm"), InlineKeyboardButton(text="Standard", callback_data="set_profile_standard"), InlineKeyboardButton(text="Hardcore", callback_data="set_profile_hardcore")],
+            [InlineKeyboardButton(text="Live events ON/OFF", callback_data="set_toggle_live_events")],
         ]
     )

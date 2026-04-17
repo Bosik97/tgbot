@@ -22,7 +22,10 @@ def init_db() -> None:
             notify_lineup_enabled INTEGER DEFAULT 1,
             quiet_hours_enabled INTEGER DEFAULT 0,
             quiet_start_hour INTEGER DEFAULT 23,
-            quiet_end_hour INTEGER DEFAULT 8
+            quiet_end_hour INTEGER DEFAULT 8,
+            notify_profile TEXT DEFAULT 'standard',
+            live_events_enabled INTEGER DEFAULT 0,
+            spoiler_mode INTEGER DEFAULT 0
         )
         """
     )
@@ -60,6 +63,27 @@ def init_db() -> None:
         )
         """
     )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS predictions (
+            user_id INTEGER,
+            fixture_id INTEGER,
+            prediction TEXT,
+            points INTEGER DEFAULT 0,
+            settled INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, fixture_id)
+        )
+        """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS friends (
+            user_id INTEGER,
+            friend_id INTEGER,
+            PRIMARY KEY (user_id, friend_id)
+        )
+        """
+    )
     conn.commit()
 
     # Lightweight migration for older DB versions.
@@ -74,6 +98,9 @@ def init_db() -> None:
         "quiet_hours_enabled": "INTEGER DEFAULT 0",
         "quiet_start_hour": "INTEGER DEFAULT 23",
         "quiet_end_hour": "INTEGER DEFAULT 8",
+        "notify_profile": "TEXT DEFAULT 'standard'",
+        "live_events_enabled": "INTEGER DEFAULT 0",
+        "spoiler_mode": "INTEGER DEFAULT 0",
     }
     for column, ddl in required.items():
         if column not in existing_columns:
@@ -115,6 +142,9 @@ def update_user(
     quiet_hours_enabled: Optional[int] = None,
     quiet_start_hour: Optional[int] = None,
     quiet_end_hour: Optional[int] = None,
+    notify_profile: Optional[str] = None,
+    live_events_enabled: Optional[int] = None,
+    spoiler_mode: Optional[int] = None,
 ) -> None:
     updates = []
     values = []
@@ -130,6 +160,9 @@ def update_user(
         "quiet_hours_enabled": quiet_hours_enabled,
         "quiet_start_hour": quiet_start_hour,
         "quiet_end_hour": quiet_end_hour,
+        "notify_profile": notify_profile,
+        "live_events_enabled": live_events_enabled,
+        "spoiler_mode": spoiler_mode,
     }
     for field, value in payload.items():
         if value is not None:
@@ -214,3 +247,43 @@ def set_fixture_snapshot(user_id: int, fixture_id: int, starts_at_utc: str) -> N
         (user_id, fixture_id, starts_at_utc),
     )
     conn.commit()
+
+
+def save_prediction(user_id: int, fixture_id: int, prediction: str) -> None:
+    c.execute(
+        """
+        INSERT INTO predictions (user_id, fixture_id, prediction)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, fixture_id) DO UPDATE SET prediction=excluded.prediction
+        """,
+        (user_id, fixture_id, prediction),
+    )
+    conn.commit()
+
+
+def get_unsettled_predictions():
+    c.execute("SELECT * FROM predictions WHERE settled=0")
+    return c.fetchall()
+
+
+def settle_prediction(user_id: int, fixture_id: int, points: int) -> None:
+    c.execute(
+        "UPDATE predictions SET points=?, settled=1 WHERE user_id=? AND fixture_id=?",
+        (points, user_id, fixture_id),
+    )
+    conn.commit()
+
+
+def get_total_points(user_id: int) -> int:
+    c.execute("SELECT COALESCE(SUM(points), 0) AS total FROM predictions WHERE user_id=?", (user_id,))
+    return int(c.fetchone()["total"])
+
+
+def add_friend(user_id: int, friend_id: int) -> None:
+    c.execute("INSERT OR IGNORE INTO friends (user_id, friend_id) VALUES (?, ?)", (user_id, friend_id))
+    conn.commit()
+
+
+def get_friends(user_id: int):
+    c.execute("SELECT friend_id FROM friends WHERE user_id=?", (user_id,))
+    return [row["friend_id"] for row in c.fetchall()]
