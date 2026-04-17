@@ -17,7 +17,7 @@ from database import (
     remove_favorite,
     update_user,
 )
-from keyboards import MENU_TEXTS, language_kb, main_menu, settings_kb
+from keyboards import MENU_TEXTS, language_kb, main_menu, settings_kb_localized
 from utils import get_city_timezone, get_fixtures, normalize_lang, search_teams, t, validate_timezone
 from utils import get_team_form, parse_utc_datetime
 
@@ -145,17 +145,32 @@ async def settings_callback(callback: CallbackQuery, state: FSMContext):
         update_user(callback.from_user.id, quiet_hours_enabled=0 if user["quiet_hours_enabled"] else 1)
     elif action == "set_day_hour":
         await state.set_state(UserState.waiting_day_hour)
-        await callback.message.answer("Send day notification hour (0-23)")
+        prompts = {
+            "ru": "Отправь час для дневного уведомления (0-23)",
+            "kk": "Күндізгі хабарлама уақытын жібер (0-23)",
+            "en": "Send day notification hour (0-23)",
+        }
+        await callback.message.answer(prompts.get(lang, prompts["en"]))
         await callback.answer()
         return
     elif action == "set_before_minutes":
         await state.set_state(UserState.waiting_before_minutes)
-        await callback.message.answer("Send before-match minutes (10-720)")
+        prompts = {
+            "ru": "Отправь минуты до матча (10-720)",
+            "kk": "Матчқа дейінгі минутты жібер (10-720)",
+            "en": "Send before-match minutes (10-720)",
+        }
+        await callback.message.answer(prompts.get(lang, prompts["en"]))
         await callback.answer()
         return
     elif action == "set_quiet_range":
         await state.set_state(UserState.waiting_quiet_range)
-        await callback.message.answer("Send quiet range as HH-HH (example: 23-8)")
+        prompts = {
+            "ru": "Отправь тихий диапазон как ЧЧ-ЧЧ (пример: 23-8)",
+            "kk": "Тыныш уақытты СС-СС форматында жібер (мысалы: 23-8)",
+            "en": "Send quiet range as HH-HH (example: 23-8)",
+        }
+        await callback.message.answer(prompts.get(lang, prompts["en"]))
         await callback.answer()
         return
     elif action == "set_timezone":
@@ -165,7 +180,10 @@ async def settings_callback(callback: CallbackQuery, state: FSMContext):
         return
 
     updated_user = get_user(callback.from_user.id)
-    await callback.message.edit_text(t(lang, "settings_title"), reply_markup=settings_kb(updated_user))
+    await callback.message.edit_text(
+        t(lang, "settings_title"),
+        reply_markup=settings_kb_localized(updated_user, lang),
+    )
     await callback.answer(t(lang, "settings_saved"))
 
 
@@ -186,10 +204,24 @@ async def set_timezone_handler(message: Message, state: FSMContext):
 async def set_day_hour_handler(message: Message, state: FSMContext):
     value = (message.text or "").strip()
     if not value.isdigit() or not 0 <= int(value) <= 23:
-        await message.answer("Hour should be from 0 to 23.")
+        texts = {
+            "ru": "Час должен быть от 0 до 23.",
+            "kk": "Сағат 0 мен 23 аралығында болуы керек.",
+            "en": "Hour should be from 0 to 23.",
+        }
+        user = ensure_user(message.from_user.id, message.from_user.username)
+        lang = normalize_lang(user["language"])
+        await message.answer(texts.get(lang, texts["en"]))
         return
     update_user(message.from_user.id, notify_day_hour=int(value))
-    await message.answer("Day notification hour updated.")
+    texts = {
+        "ru": "Час дневного уведомления обновлен.",
+        "kk": "Күндізгі хабарлама уақыты жаңартылды.",
+        "en": "Day notification hour updated.",
+    }
+    user = ensure_user(message.from_user.id, message.from_user.username)
+    lang = normalize_lang(user["language"])
+    await message.answer(texts.get(lang, texts["en"]))
     await state.clear()
 
 
@@ -197,10 +229,24 @@ async def set_day_hour_handler(message: Message, state: FSMContext):
 async def set_before_minutes_handler(message: Message, state: FSMContext):
     value = (message.text or "").strip()
     if not value.isdigit() or not 10 <= int(value) <= 720:
-        await message.answer("Minutes should be from 10 to 720.")
+        texts = {
+            "ru": "Минуты должны быть от 10 до 720.",
+            "kk": "Минут 10 бен 720 аралығында болуы керек.",
+            "en": "Minutes should be from 10 to 720.",
+        }
+        user = ensure_user(message.from_user.id, message.from_user.username)
+        lang = normalize_lang(user["language"])
+        await message.answer(texts.get(lang, texts["en"]))
         return
     update_user(message.from_user.id, notify_before_minutes=int(value))
-    await message.answer("Before-match reminder updated.")
+    texts = {
+        "ru": "Напоминание перед матчем обновлено.",
+        "kk": "Матч алдындағы еске салғыш жаңартылды.",
+        "en": "Before-match reminder updated.",
+    }
+    user = ensure_user(message.from_user.id, message.from_user.username)
+    lang = normalize_lang(user["language"])
+    await message.answer(texts.get(lang, texts["en"]))
     await state.clear()
 
 
@@ -210,16 +256,31 @@ async def set_quiet_range_handler(message: Message, state: FSMContext):
     lang = normalize_lang(user["language"])
     value = (message.text or "").strip().replace(" ", "")
     if "-" not in value:
-        await message.answer("Format should be HH-HH (example: 23-8).")
+        texts = {
+            "ru": "Формат должен быть ЧЧ-ЧЧ (пример: 23-8).",
+            "kk": "Формат СС-СС болуы керек (мысалы: 23-8).",
+            "en": "Format should be HH-HH (example: 23-8).",
+        }
+        await message.answer(texts.get(lang, texts["en"]))
         return
     left, right = value.split("-", 1)
     if not left.isdigit() or not right.isdigit():
-        await message.answer("Use numbers only, example: 23-8.")
+        texts = {
+            "ru": "Используй только цифры, пример: 23-8.",
+            "kk": "Тек сандарды қолдан, мысалы: 23-8.",
+            "en": "Use numbers only, example: 23-8.",
+        }
+        await message.answer(texts.get(lang, texts["en"]))
         return
     start = int(left)
     end = int(right)
     if not (0 <= start <= 23 and 0 <= end <= 23):
-        await message.answer("Hours must be in range 0..23.")
+        texts = {
+            "ru": "Часы должны быть в диапазоне 0..23.",
+            "kk": "Сағат 0..23 диапазонында болуы керек.",
+            "en": "Hours must be in range 0..23.",
+        }
+        await message.answer(texts.get(lang, texts["en"]))
         return
     update_user(message.from_user.id, quiet_start_hour=start, quiet_end_hour=end)
     await message.answer(t(lang, "quiet_saved", start=start, end=end))
@@ -230,7 +291,19 @@ async def set_quiet_range_handler(message: Message, state: FSMContext):
 async def team_search_from_state(message: Message, state: FSMContext):
     user = ensure_user(message.from_user.id, message.from_user.username)
     lang = normalize_lang(user["language"])
-    teams = await search_teams((message.text or "").strip())
+    menu = MENU_TEXTS.get(lang, MENU_TEXTS["en"])
+    query = (message.text or "").strip()
+
+    if query == menu["add"]:
+        await message.answer(t(lang, "ask_team_query"))
+        return
+
+    if query in {menu["teams"], menu["today"], menu["settings"]}:
+        await state.clear()
+        await message.answer(t(lang, "main_hint"), reply_markup=main_menu(lang))
+        return
+
+    teams = await search_teams(query)
     if not teams:
         await message.answer(t(lang, "search_empty"))
         return
@@ -310,7 +383,10 @@ async def main_handler(message: Message, state: FSMContext):
 
     if text == menu["settings"]:
         refreshed = get_user(message.from_user.id)
-        await message.answer(t(lang, "settings_title"), reply_markup=settings_kb(refreshed))
+        await message.answer(
+            t(lang, "settings_title"),
+            reply_markup=settings_kb_localized(refreshed, lang),
+        )
         return
 
     teams = await search_teams(text)
