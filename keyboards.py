@@ -1,16 +1,17 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from config import LANGUAGES
 
 def main_menu(lang='ru'):
     texts = {
-        'ru': ["Мои команды ⚽", "Добавить команду ➕", "Сегодня 📅", "Настройки ⚙️"],
-        'kk': ["Менің командаларым ⚽", "Команда қосу ➕", "Бүгін 📅", "Параметрлер ⚙️"],
-        'en': ["My Teams ⚽", "Add Team ➕", "Today 📅", "Settings ⚙️"]
+        'ru': ["Мои команды ⚽", "Добавить команду ➕", "Сегодняшние матчи 📅", "Настройки ⚙️"],
+        'kk': ["Менің командаларым ⚽", "Команда қосу ➕", "Бүгінгі матчтар 📅", "Параметрлер ⚙️"],
+        'en': ["My Teams ⚽", "Add Team ➕", "Today's Matches 📅", "Settings ⚙️"]
     }
     t = texts.get(lang, texts['ru'])
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(i)] for i in t], resize_keyboard=True)
+    kb = [[KeyboardButton(text)] for text in t]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-def language_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=v, callback_data=f"lang_{k}") for k,v in LANGUAGES.items()]
+def language_keyboard():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=v, callback_data=f"lang_{k}") for k, v in LANGUAGES.items()]
     ])
+    return kb
