@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import pytz
 import aiohttp
-from config import DEFAULT_TIMEZONE, I18N, LANGUAGES, FOOTBALL_DATA_BASE_URL
+from config import DEFAULT_TIMEZONE, I18N, LANGUAGES, FOOTBALL_DATA_BASE_URL, API_FOOTBALL_KEY, API_BASE_URL
 
 # Translation helper
 def t(lang: str, key: str, **kwargs) -> str:
@@ -74,6 +74,49 @@ def is_top_match(fixture: dict) -> bool:
     if any(team in home for team in top_teams) and any(team in away for team in top_teams):
         return True
     return False
+
+# ========== API FOOTBALL ==========
+async def fetch_fixtures_from_api(date_str: str) -> list:
+    """Fetch fixtures from API Football for a given date (YYYY-MM-DD)"""
+    if not API_FOOTBALL_KEY:
+        print("[API] No API key provided")
+        return []
+
+    url = f"{API_BASE_URL}/fixtures"
+    headers = {
+        'x-rapidapi-key': API_FOOTBALL_KEY,
+        'x-rapidapi-host': 'v3.football.api-sports.io'
+    }
+    params = {'date': date_str}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    print(f"[API] HTTP {resp.status}")
+                    return []
+                data = await resp.json()
+                fixtures = []
+                for fixture in data.get('response', []):
+                    fixture_data = fixture.get('fixture', {})
+                    teams = fixture.get('teams', {})
+                    league = fixture.get('league', {})
+                    goals = fixture.get('goals', {})
+
+                    fixtures.append({
+                        "home_team_name": teams.get('home', {}).get('name', ''),
+                        "away_team_name": teams.get('away', {}).get('name', ''),
+                        "league": league.get('name', ''),
+                        "match_date_utc": fixture_data.get('date', ''),
+                        "status": fixture_data.get('status', {}).get('short', ''),
+                        "score_home": goals.get('home'),
+                        "score_away": goals.get('away'),
+                    })
+                return fixtures
+    except Exception as e:
+        print(f"[API] Error: {e}")
+        return []
+
 
 # ========== SCRAPING: ESPN ==========
 async def _scrape_espn_matches(date_str: str) -> list:
@@ -149,13 +192,18 @@ async def _scrape_sofascore_matches(date_str: str) -> list:
         print(f"[SCRAPER SofaScore] Error: {e}")
         return []
 
-# ========== MAIN SCRAPER DISPATCHER ==========
+# ========== MAIN FETCHER ==========
 async def fetch_fixtures_from_web(date_str: str) -> list:
     """
     Try multiple sources to get fixtures for a given date (YYYY-MM-DD).
     Returns list of fixture dicts compatible with local DB schema.
-    Order: ESPN -> SofaScore -> empty
+    Order: API Football -> ESPN -> SofaScore -> empty
     """
+    fixtures = await fetch_fixtures_from_api(date_str)
+    if fixtures:
+        print(f"[API] Fixtures: {len(fixtures)}")
+        return fixtures
+
     fixtures = await _scrape_espn_matches(date_str)
     if fixtures:
         print(f"[SCRAPER] ESPN: {len(fixtures)} fixtures")
@@ -166,8 +214,42 @@ async def fetch_fixtures_from_web(date_str: str) -> list:
         print(f"[SCRAPER] SofaScore: {len(fixtures)} fixtures")
         return fixtures
 
-    print(f"[SCRAPER] All sources failed for {date_str}")
+    print(f"[FETCHER] All sources failed for {date_str}")
     return []
+
+# ========== TEAM SEARCH VIA API ==========
+async def search_teams_api(query: str) -> list:
+    """Search teams via API Football"""
+    if not API_FOOTBALL_KEY:
+        return []
+
+    url = f"{API_BASE_URL}/teams"
+    headers = {
+        'x-rapidapi-key': API_FOOTBALL_KEY,
+        'x-rapidapi-host': 'v3.football.api-sports.io'
+    }
+    params = {'search': query}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                results = []
+                seen_ids = set()
+                for team_data in data.get('response', []):
+                    team = team_data.get('team', {})
+                    tid = team.get('id')
+                    name = team.get('name', '')
+                    if tid and name and tid not in seen_ids:
+                        results.append({"team": {"id": tid, "name": name}})
+                        seen_ids.add(tid)
+                return results[:8]
+    except Exception as e:
+        print(f"[API TEAM] Error: {e}")
+        return []
+
 
 # ========== TEAM SEARCH VIA WEB ==========
 async def search_teams_web(query: str) -> list:
@@ -202,9 +284,13 @@ async def search_teams_web(query: str) -> list:
     # Try football-data teams endpoint (requires key, skip)
     return []
 
-# ========== TEAM SEARCH VIA WEB (variant for direct teams) ==========
+# ========== TEAM SEARCH ==========
 async def search_teams(query: str) -> list:
-    """Search teams: try web scrapers first, then fallback to alias mapping."""
+    """Search teams: try API first, then web scrapers, then fallback to alias mapping."""
+    results = await search_teams_api(query)
+    if results:
+        return results
+
     results = await search_teams_web(query)
     if results:
         return results
