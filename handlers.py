@@ -22,7 +22,7 @@ from database import (
     save_prediction,
 )
 from keyboards import MENU_TEXTS, language_kb, main_menu, settings_kb_localized
-from utils import get_city_timezone, get_fixture_by_id, get_fixtures, get_h2h, get_last_fixtures, get_next_fixtures, is_top_match, normalize_lang, search_teams, t, validate_timezone
+from utils import get_api_status, get_city_timezone, get_fixture_by_id, get_fixtures, get_h2h, get_last_fixtures, get_upcoming_fixtures, is_top_match, normalize_lang, search_teams, t, validate_timezone
 from utils import get_team_form, parse_utc_datetime
 
 router = Router()
@@ -103,6 +103,38 @@ async def admin_broadcast(message: Message, state: FSMContext):
         return
     await state.set_state(UserState.waiting_broadcast)
     await message.answer(t("ru", "broadcast_hint"))
+
+
+@router.message(Command("apistatus"))
+async def cmd_apistatus(message: Message):
+    user = ensure_user(message.from_user.id, message.from_user.username)
+    lang = normalize_lang(user["language"])
+    status = await get_api_status()
+    favorites = get_favorites(message.from_user.id)
+    sample_info = "no favorites"
+    if favorites:
+        team_id, team_name = favorites[0]
+        fixtures, diag = await get_upcoming_fixtures(int(team_id), limit=3)
+        sample_info = f"{team_name}: fixtures={len(fixtures)}"
+        if diag:
+            sample_info += f", diag={diag}"
+
+    text = (
+        f"API status: {'OK' if status['ok'] else 'FAIL'}\n"
+        f"Requests remaining: {status['requests_remaining']}\n"
+        f"Status endpoint results: {status['results']}\n"
+        f"Errors: {status['errors'] or 'none'}\n"
+        f"Sample favorite check: {sample_info}"
+    )
+    if lang == "ru":
+        text = (
+            f"Статус API: {'OK' if status['ok'] else 'FAIL'}\n"
+            f"Осталось запросов: {status['requests_remaining']}\n"
+            f"Результаты status endpoint: {status['results']}\n"
+            f"Ошибки: {status['errors'] or 'нет'}\n"
+            f"Проверка избранного: {sample_info}"
+        )
+    await message.answer(text)
 
 
 @router.message(UserState.waiting_broadcast)
@@ -486,10 +518,11 @@ async def main_handler(message: Message, state: FSMContext):
         upcoming = []
 
         seen_fixture_ids = set()
+        diagnostics = []
         for team_id, team_name in favorites:
-            fixtures = await get_next_fixtures(int(team_id), count=8)
-            if not fixtures:
-                fixtures = await get_fixtures(int(team_id), days=60)
+            fixtures, diag = await get_upcoming_fixtures(int(team_id), limit=10)
+            if diag:
+                diagnostics.append(f"{team_name}: {diag}")
             team_form = await get_team_form(int(team_id))
             for fixture in fixtures:
                 fixture_id = int(fixture["fixture"]["id"])
@@ -560,7 +593,11 @@ async def main_handler(message: Message, state: FSMContext):
                         }
                     )
             if not played:
-                await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье.")
+                debug_tail = ""
+                if diagnostics:
+                    # Keep user-facing diagnostic short and readable.
+                    debug_tail = "\nИсточник не вернул матчи (возможен лимит API/план/межсезонье)."
+                await message.answer(t(lang, "next5_empty") + "\nПопробуй добавить еще команду или проверь межсезонье." + debug_tail)
                 return
             last5 = sorted(played, key=lambda row: row["dt"], reverse=True)[:5]
             lines = []

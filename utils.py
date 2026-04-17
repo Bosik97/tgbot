@@ -87,6 +87,88 @@ async def get_last_fixtures(team_id: int, count: int = 5):
     return payload.get("response", [])
 
 
+async def get_upcoming_fixtures(team_id: int, limit: int = 10):
+    """
+    Robust upcoming fixtures fetch with multi-step fallback.
+    Returns tuple: (fixtures, diagnostic_message_or_empty)
+    """
+    diagnostics = []
+
+    # 1) Preferred API-Football way.
+    payload = await _api_get(f"{API_BASE_URL}/fixtures?team={team_id}&next={limit}", ttl_seconds=90)
+    fixtures = payload.get("response", [])
+    if fixtures:
+        return fixtures, ""
+    err = _extract_api_errors(payload)
+    if err:
+        diagnostics.append(f"next={err}")
+
+    # 2) Wide date range fallback.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    until = (datetime.now(timezone.utc) + timedelta(days=365)).strftime("%Y-%m-%d")
+    payload = await _api_get(f"{API_BASE_URL}/fixtures?team={team_id}&from={today}&to={until}", ttl_seconds=90)
+    fixtures = payload.get("response", [])
+    if fixtures:
+        return fixtures[:limit], ""
+    err = _extract_api_errors(payload)
+    if err:
+        diagnostics.append(f"range={err}")
+
+    # 3) Season fallback (current and next year).
+    current_year = datetime.now(timezone.utc).year
+    for season in (current_year, current_year + 1):
+        payload = await _api_get(
+            f"{API_BASE_URL}/fixtures?team={team_id}&season={season}&status=NS",
+            ttl_seconds=600,
+        )
+        fixtures = payload.get("response", [])
+        if fixtures:
+            return fixtures[:limit], ""
+        err = _extract_api_errors(payload)
+        if err:
+            diagnostics.append(f"season_{season}={err}")
+
+    return [], " | ".join(diagnostics[:3])
+
+
+async def get_api_status() -> dict:
+    """
+    Lightweight API-Football status probe.
+    Returns:
+      {
+        "ok": bool,
+        "errors": str,
+        "results": int,
+        "requests_remaining": str,
+      }
+    """
+    url = f"{API_BASE_URL}/status"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=20) as resp:
+                payload = await resp.json()
+                remaining = (
+                    resp.headers.get("X-RateLimit-Requests-Remaining")
+                    or resp.headers.get("x-ratelimit-requests-remaining")
+                    or resp.headers.get("X-RateLimit-Remaining")
+                    or "unknown"
+                )
+                errors = _extract_api_errors(payload)
+                return {
+                    "ok": resp.status == 200 and not errors,
+                    "errors": errors,
+                    "results": len(payload.get("response", [])),
+                    "requests_remaining": str(remaining),
+                }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "errors": str(exc),
+            "results": 0,
+            "requests_remaining": "unknown",
+        }
+
+
 async def get_team_form(team_id: int, last: int = 5) -> str:
     url = f"{API_BASE_URL}/fixtures?team={team_id}&last={last}"
     payload = await _api_get(url, ttl_seconds=3600)
@@ -182,6 +264,8 @@ async def _api_get(url: str, ttl_seconds: int = 120) -> dict:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=20) as resp:
                 payload = await resp.json()
+                if payload.get("errors"):
+                    print(f"API-Football warning for {url}: {payload.get('errors')}")
                 _api_cache[url] = {
                     "expires_at": now + timedelta(seconds=ttl_seconds),
                     "payload": payload,
@@ -220,3 +304,16 @@ def _merge_team_results(primary: list, secondary: list) -> list:
         seen_ids.add(team_id)
         merged.append(item)
     return merged
+
+
+def _extract_api_errors(payload: dict) -> str:
+    errors = payload.get("errors")
+    if not errors:
+        return ""
+    if isinstance(errors, dict):
+        parts = []
+        for key, value in errors.items():
+            if value:
+                parts.append(f"{key}:{value}")
+        return ", ".join(parts)
+    return str(errors)
