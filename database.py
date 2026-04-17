@@ -361,6 +361,24 @@ def add_fixture(
     return c.lastrowid
 
 
+def get_fixture_by_local_id(fixture_id: int):
+    c.execute("SELECT * FROM fixtures WHERE id=?", (fixture_id,))
+    return c.fetchone()
+
+
+def update_fixture_score(fixture_id: int, score_home: int, score_away: int, status: str = None):
+    if status:
+        c.execute("UPDATE fixtures SET score_home=?, score_away=?, status=? WHERE id=?", (score_home, score_away, status, fixture_id))
+    else:
+        c.execute("UPDATE fixtures SET score_home=?, score_away=? WHERE id=?", (score_home, score_away, fixture_id))
+    conn.commit()
+
+
+def delete_fixture(fixture_id: int):
+    c.execute("DELETE FROM fixtures WHERE id=?", (fixture_id,))
+    conn.commit()
+
+
 def get_fixtures_by_team(team_name: str, days: int = 30):
     from datetime import datetime, timedelta, timezone
     now_utc = datetime.now(timezone.utc)
@@ -393,24 +411,6 @@ def get_all_upcoming_fixtures(limit: int = 50):
     return c.fetchall()
 
 
-def get_fixture_by_local_id(fixture_id: int):
-    c.execute("SELECT * FROM fixtures WHERE id=?", (fixture_id,))
-    return c.fetchone()
-
-
-def update_fixture_score(fixture_id: int, score_home: int, score_away: int, status: str = None):
-    if status:
-        c.execute("UPDATE fixtures SET score_home=?, score_away=?, status=? WHERE id=?", (score_home, score_away, status, fixture_id))
-    else:
-        c.execute("UPDATE fixtures SET score_home=?, score_away=? WHERE id=?", (score_home, score_away, fixture_id))
-    conn.commit()
-
-
-def delete_fixture(fixture_id: int):
-    c.execute("DELETE FROM fixtures WHERE id=?", (fixture_id,))
-    conn.commit()
-
-
 def get_fixtures_in_range(start_date_utc: str, end_date_utc: str):
     c.execute(
         """
@@ -438,3 +438,106 @@ def get_last_fixtures_by_team(team_name: str, count: int = 5):
         (f"%{team_name}%", f"%{team_name}%", now_utc.isoformat(), count),
     )
     return c.fetchall()
+
+
+def get_all_fixtures_count() -> int:
+    c.execute("SELECT COUNT(*) AS total FROM fixtures")
+    return int(c.fetchone()["total"])
+
+
+# Notification tracking functions
+def was_notification_sent(user_id: int, fixture_id: int, notif_type: str) -> bool:
+    c.execute(
+        "SELECT 1 FROM sent_notifications WHERE user_id=? AND fixture_id=? AND notif_type=?",
+        (user_id, fixture_id, notif_type),
+    )
+    return c.fetchone() is not None
+
+
+def mark_notification_sent(user_id: int, fixture_id: int, notif_type: str) -> None:
+    c.execute(
+        """
+        INSERT OR IGNORE INTO sent_notifications (user_id, fixture_id, notif_type)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, fixture_id, notif_type),
+    )
+    conn.commit()
+
+
+def get_fixture_snapshot(user_id: int, fixture_id: int) -> Optional[str]:
+    c.execute(
+        "SELECT starts_at_utc FROM fixture_snapshot WHERE user_id=? AND fixture_id=?",
+        (user_id, fixture_id),
+    )
+    row = c.fetchone()
+    return row["starts_at_utc"] if row else None
+
+
+def set_fixture_snapshot(user_id: int, fixture_id: int, starts_at_utc: str) -> None:
+    c.execute(
+        """
+        INSERT INTO fixture_snapshot (user_id, fixture_id, starts_at_utc)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, fixture_id) DO UPDATE SET starts_at_utc=excluded.starts_at_utc
+        """,
+        (user_id, fixture_id, starts_at_utc),
+    )
+    conn.commit()
+
+
+# Predictions functions
+def save_prediction(user_id: int, fixture_id: int, prediction: str) -> None:
+    c.execute(
+        """
+        INSERT INTO predictions (user_id, fixture_id, prediction)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, fixture_id) DO UPDATE SET prediction=excluded.prediction
+        """,
+        (user_id, fixture_id, prediction),
+    )
+    conn.commit()
+
+
+def get_unsettled_predictions():
+    c.execute("SELECT * FROM predictions WHERE settled=0")
+    return c.fetchall()
+
+
+def settle_prediction(user_id: int, fixture_id: int, points: int) -> None:
+    c.execute(
+        "UPDATE predictions SET points=?, settled=1 WHERE user_id=? AND fixture_id=?",
+        (points, user_id, fixture_id),
+    )
+    conn.commit()
+
+
+def get_total_points(user_id: int) -> int:
+    c.execute("SELECT COALESCE(SUM(points), 0) AS total FROM predictions WHERE user_id=?", (user_id,))
+    return int(c.fetchone()["total"])
+
+
+# Friends functions
+def add_friend(user_id: int, friend_id: int) -> None:
+    c.execute("INSERT OR IGNORE INTO friends (user_id, friend_id) VALUES (?, ?)", (user_id, friend_id))
+    conn.commit()
+
+
+def get_friends(user_id: int):
+    c.execute("SELECT friend_id FROM friends WHERE user_id=?", (user_id,))
+    return [row["friend_id"] for row in c.fetchall()]
+
+
+def get_all_fixtures_count() -> int:
+    c.execute("SELECT COUNT(*) AS total FROM fixtures")
+    return int(c.fetchone()["total"])
+
+
+def add_friend(user_id: int, friend_id: int) -> None:
+    c.execute("INSERT OR IGNORE INTO friends (user_id, friend_id) VALUES (?, ?)", (user_id, friend_id))
+    conn.commit()
+
+
+def get_friends(user_id: int):
+    c.execute("SELECT friend_id FROM friends WHERE user_id=?", (user_id,))
+    return [row["friend_id"] for row in c.fetchall()]
