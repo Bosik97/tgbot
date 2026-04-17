@@ -3,13 +3,22 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 from geopy.geocoders import Nominatim
 import pytz
-from timezonefinder import TimezoneFinder
 from config import API_FOOTBALL_KEY, API_BASE_URL, DEFAULT_TIMEZONE, I18N
 
 headers = {"x-apisports-key": API_FOOTBALL_KEY}
-tf = TimezoneFinder()
 _api_cache = {}
 _api_lock = asyncio.Semaphore(4)
+CITY_TZ_OVERRIDES = {
+    "almaty": "Asia/Almaty",
+    "astana": "Asia/Almaty",
+    "moscow": "Europe/Moscow",
+    "saint petersburg": "Europe/Moscow",
+    "spb": "Europe/Moscow",
+    "shymkent": "Asia/Almaty",
+    "aktobe": "Asia/Aqtobe",
+    "atyrau": "Asia/Atyrau",
+    "karaganda": "Asia/Almaty",
+}
 
 
 def t(lang: str, key: str, **kwargs) -> str:
@@ -69,12 +78,12 @@ async def get_team_form(team_id: int, last: int = 5) -> str:
 
 async def get_city_timezone(city: str):
     try:
+        key = city.strip().lower()
+        if key in CITY_TZ_OVERRIDES:
+            return CITY_TZ_OVERRIDES[key]
         geo = Nominatim(user_agent="football_bot")
         loc = geo.geocode(city)
         if loc:
-            timezone_name = tf.timezone_at(lng=loc.longitude, lat=loc.latitude)
-            if timezone_name and validate_timezone(timezone_name):
-                return timezone_name
             country_tzs = pytz.country_timezones.get(
                 loc.raw.get("country_code", "KZ").upper(),
                 [DEFAULT_TIMEZONE],
